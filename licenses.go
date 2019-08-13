@@ -17,8 +17,8 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/groove-x/licenses/assets"
-	"github.com/groove-x/licenses/modinfo"
+	"github.com/groove-x/go-licenses/assets"
+	"github.com/groove-x/go-licenses/modinfo"
 )
 
 type Template struct {

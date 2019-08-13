@@ -1,3 +1,3 @@
-module github.com/groove-x/licenses
+module github.com/groove-x/go-licenses
 
 go 1.12
