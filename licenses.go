@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"io/ioutil"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,7 +17,8 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/pmezard/licenses/assets"
+	"github.com/groove-x/licenses/assets"
+	"github.com/groove-x/licenses/modinfo"
 )
 
 type Template struct {
@@ -177,99 +180,34 @@ func matchTemplates(license []byte, templates []*Template) MatchResult {
 	}
 }
 
-// fixEnv returns a copy of the process environment where GOPATH is adjusted to
-// supplied value. It returns nil if gopath is empty.
-func fixEnv(gopath string) []string {
-	if gopath == "" {
-		return nil
-	}
-	kept := []string{
-		"GOPATH=" + gopath,
-	}
-	for _, env := range os.Environ() {
-		if !strings.HasPrefix(env, "GOPATH=") {
-			kept = append(kept, env)
-		}
-	}
-	return kept
-}
-
-type MissingError struct {
-	Err string
-}
-
-func (err *MissingError) Error() string {
-	return err.Err
-}
-
-// expandPackages takes a list of package or package expressions and invoke go
-// list to expand them to packages. In particular, it handles things like "..."
-// and ".".
-func expandPackages(gopath string, pkgs []string) ([]string, error) {
-	args := []string{"list"}
+func listDependencies(gopath string, pkgs []string) ([]*modinfo.ModulePublic, error) {
+	args := []string{"list", "-m", "-json", "all"}
 	args = append(args, pkgs...)
 	cmd := exec.Command("go", args...)
-	cmd.Env = fixEnv(gopath)
-	out, err := cmd.CombinedOutput()
+	cmd.Env = os.Environ()
+	var b bytes.Buffer
+	var berr bytes.Buffer
+	cmd.Stdout = &b
+	cmd.Stderr = &berr
+	err := cmd.Run()
 	if err != nil {
-		output := string(out)
-		if strings.Contains(output, "cannot find package") ||
-			strings.Contains(output, "no buildable Go source files") {
-			return nil, &MissingError{Err: output}
-		}
 		return nil, fmt.Errorf("'go %s' failed with:\n%s",
-			strings.Join(args, " "), output)
+			strings.Join(args, " "), berr.String())
 	}
-	names := []string{}
-	for _, s := range strings.Split(string(out), "\n") {
-		s = strings.TrimSpace(s)
-		if s != "" {
-			names = append(names, s)
-		}
-	}
-	return names, nil
-}
 
-func listPackagesAndDeps(gopath string, pkgs []string) ([]string, error) {
-	pkgs, err := expandPackages(gopath, pkgs)
-	if err != nil {
-		return nil, err
-	}
-	args := []string{"list", "-f", "{{range .Deps}}{{.}}|{{end}}"}
-	args = append(args, pkgs...)
-	cmd := exec.Command("go", args...)
-	cmd.Env = fixEnv(gopath)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		output := string(out)
-		if strings.Contains(output, "cannot find package") ||
-			strings.Contains(output, "no buildable Go source files") {
-			return nil, &MissingError{Err: output}
+	dec := json.NewDecoder(&b)
+	var mods []*modinfo.ModulePublic
+	for {
+		var mod modinfo.ModulePublic
+		if err := dec.Decode(&mod); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, fmt.Errorf("json decode: %s", err)
 		}
-		return nil, fmt.Errorf("'go %s' failed with:\n%s",
-			strings.Join(args, " "), output)
+		mods = append(mods, &mod)
 	}
-	deps := []string{}
-	seen := map[string]bool{}
-	for _, s := range strings.Split(string(out), "|") {
-		s = strings.TrimSpace(s)
-		if s != "" && !seen[s] {
-			deps = append(deps, s)
-			seen[s] = true
-		}
-	}
-	for _, pkg := range pkgs {
-		if !seen[pkg] {
-			seen[pkg] = true
-			deps = append(deps, pkg)
-		}
-	}
-	sort.Strings(deps)
-	return deps, nil
-}
-
-func listStandardPackages(gopath string) ([]string, error) {
-	return expandPackages(gopath, []string{"std", "cmd"})
+	return mods, nil
 }
 
 type PkgError struct {
@@ -282,38 +220,6 @@ type PkgInfo struct {
 	Root       string
 	ImportPath string
 	Error      *PkgError
-}
-
-func getPackagesInfo(gopath string, pkgs []string) ([]*PkgInfo, error) {
-	args := []string{"list", "-e", "-json"}
-	// TODO: split the list for platforms which do not support massive argument
-	// lists.
-	args = append(args, pkgs...)
-	cmd := exec.Command("go", args...)
-	cmd.Env = fixEnv(gopath)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("go %s failed with:\n%s",
-			strings.Join(args, " "), string(out))
-	}
-	infos := make([]*PkgInfo, 0, len(pkgs))
-	decoder := json.NewDecoder(bytes.NewBuffer(out))
-	for _, pkg := range pkgs {
-		info := &PkgInfo{}
-		err := decoder.Decode(info)
-		if err != nil {
-			return nil, fmt.Errorf("could not retrieve package information for %s", pkg)
-		}
-		if pkg != info.ImportPath {
-			return nil, fmt.Errorf("package information mismatch: asked for %s, got %s",
-				pkg, info.ImportPath)
-		}
-		if info.Error != nil && info.Name == "" {
-			info.Name = info.ImportPath
-		}
-		infos = append(infos, info)
-	}
-	return infos, err
 }
 
 var (
@@ -344,32 +250,28 @@ func scoreLicenseName(name string) float64 {
 	return 0.
 }
 
-// findLicense looks for license files in package import path, and down to
-// parent directories until a file is found or $GOPATH/src is reached. It
-// returns the path and score of the best entry, an empty string if none was
-// found.
-func findLicense(info *PkgInfo) (string, error) {
-	path := info.ImportPath
-	for ; path != "."; path = filepath.Dir(path) {
-		fis, err := ioutil.ReadDir(filepath.Join(info.Root, "src", path))
-		if err != nil {
-			return "", err
+// findLicense looks for license files in module path. It returns the path and
+// score of the best entry, an empty string if none was found.
+func findLicense(mod *modinfo.ModulePublic) (string, error) {
+	path := mod.Dir
+	fis, err := ioutil.ReadDir(path)
+	if err != nil {
+		return "", err
+	}
+	bestScore := float64(0)
+	bestName := ""
+	for _, fi := range fis {
+		if !fi.Mode().IsRegular() {
+			continue
 		}
-		bestScore := float64(0)
-		bestName := ""
-		for _, fi := range fis {
-			if !fi.Mode().IsRegular() {
-				continue
-			}
-			score := scoreLicenseName(fi.Name())
-			if score > bestScore {
-				bestScore = score
-				bestName = fi.Name()
-			}
+		score := scoreLicenseName(fi.Name())
+		if score > bestScore {
+			bestScore = score
+			bestName = fi.Name()
 		}
-		if bestName != "" {
-			return filepath.Join(path, bestName), nil
-		}
+	}
+	if bestName != "" {
+		return filepath.Join(path, bestName), nil
 	}
 	return "", nil
 }
@@ -389,25 +291,10 @@ func listLicenses(gopath string, pkgs []string) ([]License, error) {
 	if err != nil {
 		return nil, err
 	}
-	deps, err := listPackagesAndDeps(gopath, pkgs)
+	mods, err := listDependencies(gopath, pkgs)
 	if err != nil {
-		if _, ok := err.(*MissingError); ok {
-			return nil, err
-		}
 		return nil, fmt.Errorf("could not list %s dependencies: %s",
 			strings.Join(pkgs, " "), err)
-	}
-	std, err := listStandardPackages(gopath)
-	if err != nil {
-		return nil, fmt.Errorf("could not list standard packages: %s", err)
-	}
-	stdSet := map[string]bool{}
-	for _, n := range std {
-		stdSet[n] = true
-	}
-	infos, err := getPackagesInfo(gopath, deps)
-	if err != nil {
-		return nil, err
 	}
 
 	// Cache matched licenses by path. Useful for package with a lot of
@@ -415,31 +302,22 @@ func listLicenses(gopath string, pkgs []string) ([]License, error) {
 	matched := map[string]MatchResult{}
 
 	licenses := []License{}
-	for _, info := range infos {
-		if info.Error != nil {
-			licenses = append(licenses, License{
-				Package: info.Name,
-				Err:     info.Error.Err,
-			})
-			continue
-		}
-		if stdSet[info.ImportPath] {
-			continue
-		}
-		path, err := findLicense(info)
+	for _, mod := range mods {
+		path, err := findLicense(mod)
 		if err != nil {
 			return nil, err
 		}
 		license := License{
-			Package: info.ImportPath,
+			Package: mod.Path,
 			Path:    path,
 		}
 		if path != "" {
-			fpath := filepath.Join(info.Root, "src", path)
+			fpath := path
 			m, ok := matched[fpath]
 			if !ok {
 				data, err := ioutil.ReadFile(fpath)
 				if err != nil {
+					log.Println(fpath)
 					return nil, err
 				}
 				m = matchTemplates(data, templates)
