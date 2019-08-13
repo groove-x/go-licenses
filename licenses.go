@@ -547,8 +547,7 @@ displayed along with its score.
 With -a, all individual packages are displayed instead of grouping them by
 license files.
 With -w, words in package license file not found in the template license are
-displayed. It helps assessing the changes importance.
-`)
+displayed. It helps assessing the changes importance.`)
 		os.Exit(1)
 	}
 	all := flag.Bool("a", false, "display all individual packages")
