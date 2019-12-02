@@ -210,6 +210,22 @@ func listDependencies(gopath string, pkgs []string) ([]*modinfo.ModulePublic, er
 	return mods, nil
 }
 
+func isLinkedModule(modulePath string) (bool, error) {
+	args := []string{"mod", "why", "-m", "-vendor", modulePath}
+	cmd := exec.Command("go", args...)
+	cmd.Env = os.Environ()
+	var b bytes.Buffer
+	var berr bytes.Buffer
+	cmd.Stdout = &b
+	cmd.Stderr = &berr
+	err := cmd.Run()
+	if err != nil {
+		return false, fmt.Errorf("'go %s' failed with:\n%s",
+			strings.Join(args, " "), berr.String())
+	}
+	return !strings.Contains(b.String(), "(main module does not need"), nil
+}
+
 type PkgError struct {
 	Err string
 }
@@ -296,13 +312,25 @@ func listLicenses(gopath string, pkgs []string) ([]License, error) {
 		return nil, fmt.Errorf("could not list %s dependencies: %s",
 			strings.Join(pkgs, " "), err)
 	}
+	var linkedMods []*modinfo.ModulePublic
+
+	// filter modules: list only linked packages
+	for _, mod := range mods {
+		linked, err := isLinkedModule(mod.Path)
+		if err != nil {
+			return nil, err
+		}
+		if linked {
+			linkedMods = append(linkedMods, mod)
+		}
+	}
 
 	// Cache matched licenses by path. Useful for package with a lot of
 	// subpackages like bleve.
 	matched := map[string]MatchResult{}
 
 	licenses := []License{}
-	for _, mod := range mods {
+	for _, mod := range linkedMods {
 		path, err := findLicense(mod)
 		if err != nil {
 			return nil, err

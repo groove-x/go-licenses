@@ -192,3 +192,26 @@ func TestStandardPackages(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestIsLinkedModule(t *testing.T) {
+	modules := []struct{
+		Path   string
+		Linked bool
+	}{
+		// only module aware packages are supposed to be linked
+		{Path: "path/filepath", Linked: false},
+		{Path: "crypto/tls", Linked: false},
+		{Path: "golang.org/x/net", Linked: false},
+		{Path: "github.com/groove-x/go-licenses", Linked: true},
+	}
+
+	for _, mod := range modules {
+		linked, err := isLinkedModule(mod.Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if linked != mod.Linked {
+			t.Fatalf("%s: want %t, got %t", mod.Path, mod.Linked, linked)
+		}
+	}
+}
