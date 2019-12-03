@@ -383,6 +383,11 @@ func listLicenses(gopath string, pkgs []string) ([]License, error) {
 		}
 		licenses = append(licenses, license)
 	}
+
+	sort.Slice(licenses, func(i, j int) bool {
+		return licenses[i].Path < licenses[j].Path
+	})
+
 	return licenses, nil
 }
 
