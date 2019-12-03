@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/groove-x/go-licenses/modinfo"
 )
 
 type testResult struct {
@@ -193,8 +195,8 @@ func TestStandardPackages(t *testing.T) {
 	}
 }
 
-func TestIsLinkedModule(t *testing.T) {
-	modules := []struct{
+func TestFilterLinkedModule(t *testing.T) {
+	tests := []struct {
 		Path   string
 		Linked bool
 	}{
@@ -205,13 +207,24 @@ func TestIsLinkedModule(t *testing.T) {
 		{Path: "github.com/groove-x/go-licenses", Linked: true},
 	}
 
-	for _, mod := range modules {
-		linked, err := isLinkedModule(mod.Path)
-		if err != nil {
-			t.Fatal(err)
+	mods := make(map[string]*modinfo.ModulePublic)
+	for _, tt := range tests {
+		mods[tt.Path] = &modinfo.ModulePublic{Path: tt.Path}
+	}
+
+	linkedMods, err := filterLinkedModule(mods)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range tests {
+		linked := false
+		for _, linkedMod := range linkedMods {
+			if linkedMod.Path == tt.Path {
+				linked = true
+			}
 		}
-		if linked != mod.Linked {
-			t.Fatalf("%s: want %t, got %t", mod.Path, mod.Linked, linked)
+		if linked != tt.Linked {
+			t.Fatalf("%s: want %t, got %t", tt.Path, tt.Linked, linked)
 		}
 	}
 }
