@@ -180,7 +180,7 @@ func matchTemplates(license []byte, templates []*Template) MatchResult {
 	}
 }
 
-func listDependencies(gopath string, pkgs []string) ([]*modinfo.ModulePublic, error) {
+func listDependencies(gopath string, pkgs []string) (map[string]*modinfo.ModulePublic, error) {
 	args := []string{"list", "-m", "-json", "all"}
 	args = append(args, pkgs...)
 	cmd := exec.Command("go", args...)
@@ -196,7 +196,7 @@ func listDependencies(gopath string, pkgs []string) ([]*modinfo.ModulePublic, er
 	}
 
 	dec := json.NewDecoder(&b)
-	var mods []*modinfo.ModulePublic
+	mods := make(map[string]*modinfo.ModulePublic)
 	for {
 		var mod modinfo.ModulePublic
 		if err := dec.Decode(&mod); err != nil {
@@ -205,13 +205,18 @@ func listDependencies(gopath string, pkgs []string) ([]*modinfo.ModulePublic, er
 			}
 			return nil, fmt.Errorf("json decode: %s", err)
 		}
-		mods = append(mods, &mod)
+		mods[mod.Path] = &mod
 	}
 	return mods, nil
 }
 
-func isLinkedModule(modulePath string) (bool, error) {
-	args := []string{"mod", "why", "-m", "-vendor", modulePath}
+func filterLinkedModule(mods map[string]*modinfo.ModulePublic) ([]*modinfo.ModulePublic, error) {
+	modules := make([]string, 0, len(mods))
+	for _, mod := range mods {
+		modules = append(modules, mod.Path)
+	}
+	args := []string{"mod", "why", "-m", "-vendor"}
+	args = append(args, modules...)
 	cmd := exec.Command("go", args...)
 	cmd.Env = os.Environ()
 	var b bytes.Buffer
@@ -220,10 +225,38 @@ func isLinkedModule(modulePath string) (bool, error) {
 	cmd.Stderr = &berr
 	err := cmd.Run()
 	if err != nil {
-		return false, fmt.Errorf("'go %s' failed with:\n%s",
+		return nil, fmt.Errorf("'go %s' failed with:\n%s",
 			strings.Join(args, " "), berr.String())
 	}
-	return !strings.Contains(b.String(), "(main module does not need"), nil
+
+	var linkedMods []*modinfo.ModulePublic
+	r := bufio.NewReader(&b)
+	for {
+		line, _, err := r.ReadLine()
+		if err != nil {
+			if err == io.EOF {
+				break
+			} else {
+				return nil, fmt.Errorf("read: %s", err)
+			}
+		}
+		if bytes.HasPrefix(line, []byte{'#'}) {
+			path := string(bytes.TrimPrefix(line, []byte("# ")))
+			result, _, err := r.ReadLine()
+			if err != nil {
+				return nil, fmt.Errorf("invalid format: %s", err)
+			}
+			if !bytes.Contains(result, []byte("(main module does not need")) {
+				mod, ok := mods[path]
+				if !ok {
+					return nil, fmt.Errorf("not found: %s", path)
+				}
+				linkedMods = append(linkedMods, mod)
+			}
+		}
+	}
+
+	return linkedMods, nil
 }
 
 type PkgError struct {
@@ -312,17 +345,9 @@ func listLicenses(gopath string, pkgs []string) ([]License, error) {
 		return nil, fmt.Errorf("could not list %s dependencies: %s",
 			strings.Join(pkgs, " "), err)
 	}
-	var linkedMods []*modinfo.ModulePublic
-
-	// filter modules: list only linked packages
-	for _, mod := range mods {
-		linked, err := isLinkedModule(mod.Path)
-		if err != nil {
-			return nil, err
-		}
-		if linked {
-			linkedMods = append(linkedMods, mod)
-		}
+	linkedMods, err := filterLinkedModule(mods)
+	if err != nil {
+		return nil, fmt.Errorf("filter linked module: %s", err)
 	}
 
 	// Cache matched licenses by path. Useful for package with a lot of
